@@ -202,12 +202,20 @@ class MacDylibBundler(object):
         self.checkedLibs.add(libPath)
         return True
 
+    def _frameworksRef(self, fileToFix: Path) -> str:
+        """Prefix for references from fileToFix to the bundle's Frameworks directory.
+
+        This is relative to @loader_path rather than @executable_path: nested executables,
+        such as QtWebEngineProcess.app inside QtWebEngineCore.framework, have their own
+        @executable_path, and the libraries they load must still resolve into the main
+        bundle's Frameworks directory."""
+        frameworks = (Path(self.appPath) / "Contents/Frameworks").resolve()
+        return f"@loader_path/{os.path.relpath(frameworks, Path(fileToFix).resolve().parent)}/"
+
     @staticmethod
     def _updateLibraryReferences(fileToFix: Path, changedRefs: list) -> bool:
         args = []
         for oldRef, newRef in changedRefs:
-            if newRef is None:
-                newRef = f"@executable_path/../Frameworks/{os.path.basename(oldRef)}"
             args += ["-change", oldRef, newRef]
         with utils.makeTemporaryWritable(fileToFix):
             if not utils.system(
@@ -297,7 +305,7 @@ class MacDylibBundler(object):
             if path.startswith("@executable_path/"):
                 continue  # already fixed
             if path.startswith("@rpath/"):
-                changedRefs.append((path, "@executable_path/../Frameworks/" + path[len("@rpath/") :]))
+                changedRefs.append((path, self._frameworksRef(fileToFix) + path[len("@rpath/") :]))
             elif path.startswith("/usr/lib/") or path.startswith("/System/Library/Frameworks/"):
                 CraftCore.log.debug("%s: allowing dependency on system library '%s'", fileToFix, path)
             elif path.startswith("@loader_path/"):
@@ -311,10 +319,7 @@ class MacDylibBundler(object):
                     )
                     # Update possible new ref for deps in framework
                     if f"{os.path.basename(guessedPath)}.framework" in guessedPath:
-                        guessedNewRef = path.replace(
-                            str(CraftStandardDirs.craftRoot() / "lib"),
-                            "@executable_path/../Frameworks/",
-                        )
+                        guessedNewRef = self._frameworksRef(fileToFix) + os.path.relpath(path, CraftStandardDirs.craftRoot() / "lib")
                 elif not path.startswith("/"):
                     guessedPath = os.path.join(self.appPath, "Contents/Frameworks", path)
                 else:
@@ -327,7 +332,7 @@ class MacDylibBundler(object):
                 if not self._addLibToAppImage(Path(guessedPath)):
                     CraftCore.log.error(f"{fileToFix}: Failed to add library dependency '{guessedPath}' into bundle")
                     return False
-                changedRefs.append((path, guessedNewRef))
+                changedRefs.append((path, guessedNewRef or self._frameworksRef(fileToFix) + os.path.basename(path)))
 
         if changedRefs:
             if not self._updateLibraryReferences(fileToFix, changedRefs):
